@@ -482,6 +482,118 @@ class AttributionModel:
     denominator_event: EventTrack | None = None
     numerator_event: EventTrack | None = None
 
+    def attribute_orders(
+        self,
+        touchpoints: list[dict[str, Any]],
+        orders: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """按订单计算归因贡献明细。
+
+        每笔有效订单只在自己的回看窗口内取触点，因此同一用户的多笔订单
+        各自归因：迟到触点只进入其后的订单窗口。同一 ``order_id`` 重复提交
+        只算一笔，且每笔订单的渠道权重合计为 1。
+
+        Args:
+            touchpoints: [{user_id, channel, timestamp, touchpoint_id?}, ...]
+            orders: [{order_id, user_id, order_time | timestamp, status?}, ...]
+
+        Returns:
+            [{order_id, user_id, order_time, window, touchpoints, channel_weights}, ...]
+        """
+        from datetime import timedelta
+
+        from app.attribution import (
+            DIRECT_CHANNEL,
+            _is_valid_order,
+            _normalize_algorithm,
+            _round_weights,
+            compute_order_weights,
+            format_timestamp,
+            parse_timestamp,
+        )
+
+        def order_key(order: dict[str, Any]) -> str:
+            explicit = str(order.get("order_id") or "").strip()
+            if explicit:
+                return explicit
+            stamp = order.get("order_time") or order.get("conversion_time") or order.get("timestamp")
+            return f"{order.get('user_id')}#{stamp}"
+
+        parsed_touchpoints = []
+        for tp in touchpoints:
+            if not tp.get("timestamp"):
+                continue
+            parsed_touchpoints.append({
+                **tp,
+                "touchpoint_id": str(
+                    tp.get("touchpoint_id")
+                    or f"{tp.get('user_id')}|{tp.get('channel')}|{tp.get('timestamp')}"
+                ),
+                "_dt": parse_timestamp(tp["timestamp"]),
+            })
+
+        seen_orders: set[str] = set()
+        contributions: list[dict[str, Any]] = []
+        for order in sorted(
+            orders,
+            key=lambda item: str(
+                item.get("order_time") or item.get("conversion_time") or item.get("timestamp") or ""
+            ),
+        ):
+            order_id = order_key(order)
+            if order_id in seen_orders:
+                continue
+            seen_orders.add(order_id)
+            if not _is_valid_order(order):
+                continue
+            order_dt = parse_timestamp(
+                order.get("order_time") or order.get("conversion_time") or order.get("timestamp")
+            )
+            window_start = order_dt - timedelta(days=self.attribution_window_days)
+            usable = [
+                tp for tp in parsed_touchpoints
+                if tp.get("user_id") == order.get("user_id")
+                and window_start <= tp["_dt"] <= order_dt
+            ]
+            weighted = compute_order_weights(usable, order_dt, _normalize_algorithm(self.algorithm.value))
+            if not weighted:
+                weighted = [{
+                    "touchpoint_id": f"DIRECT-{order_id}",
+                    "user_id": order.get("user_id"),
+                    "channel": DIRECT_CHANNEL,
+                    "timestamp": format_timestamp(order_dt),
+                    "source": "fallback",
+                    "weight": 1.0,
+                }]
+            _round_weights(weighted)
+            channel_weights: dict[str, float] = {}
+            for tp in weighted:
+                if float(tp["weight"]) <= 0:
+                    # 零权重触点仍保留在触点明细里，但不进入渠道权重汇总。
+                    continue
+                channel_weights[tp["channel"]] = round(
+                    channel_weights.get(tp["channel"], 0.0) + float(tp["weight"]), 6
+                )
+            residual = round(1.0 - sum(channel_weights.values()), 6)
+            if residual:
+                channel_weights[next(iter(channel_weights))] = round(
+                    channel_weights[next(iter(channel_weights))] + residual, 6
+                )
+            contributions.append({
+                "order_id": order_id,
+                "user_id": order.get("user_id"),
+                "order_time": format_timestamp(order_dt),
+                "window": {
+                    "start": format_timestamp(window_start),
+                    "end": format_timestamp(order_dt),
+                    "minutes": self.attribution_window_days * 24 * 60,
+                },
+                "touchpoints": weighted,
+                "channel_weights": channel_weights,
+                "total_weight": 1.0,
+            })
+        return contributions
+
     def attribute(
         self,
         touchpoints: list[dict[str, Any]],

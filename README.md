@@ -73,6 +73,43 @@ npm run dev
 | 数据集关联 | `dataset_join` | 关联方案 | 方案编号、主数据集、关联数据集 |
 | 报告生成 | `report_builder` | 报告模板 | 模板编号、报告名称、引用指标 |
 
+## 归因逐笔明细与渠道复盘
+
+归因分析在模型配置之外提供订单粒度的贡献明细，供漏斗复盘按渠道取数：
+
+- 订单按 `order_id` 幂等登记，重复提交只算一笔有效转化；无效/取消订单
+  不进入明细。
+- 每笔订单只在自身「回看窗口」内取该用户触点（窗口只回看、不前瞻），
+  因此同一用户 09:00 与 12:00 两笔订单互不串窗；11:45 的迟到触点只会
+  进入 12:00 那笔的窗口。
+- 每笔有效转化的渠道权重合计恒为 1；没有命中触点时记到 `direct`。
+- 重算结果先落草稿版本，确认后成为只读快照；渠道复盘只能读取已确认
+  版本，并在复盘记录里保存当时的窗口、触点与版本校验值，事后可回溯。
+- 复盘批次用于防止更正中途串版本：同一批次内同一订单只能绑定一个已
+  确认版本；被更正的订单不会在同批次内被另一渠道按不同版本重复领取。
+  确认新版本会释放默认批次 `DEFAULT`。
+
+接口：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/api/attribution_model/orders` | 登记订单（幂等） |
+| POST | `/api/attribution_model/touchpoints` | 登记触点（幂等） |
+| POST | `/api/attribution_model/recompute` | 归因重算，`confirm=true` 同时确认 |
+| POST | `/api/attribution_model/confirm` | 确认最近一次重算版本 |
+| GET | `/api/attribution_model/contributions` | 逐笔贡献视图（窗口/触点/权重） |
+| GET | `/api/attribution_model/versions` | 归因版本列表 |
+| GET | `/api/attribution_model/versions/diff?from=&to=` | 版本差异（哪些订单变了） |
+| GET | `/api/funnel_def/funnel?channel=&version_id=` | 按渠道算漏斗各步人数（不写领取） |
+| POST | `/api/funnel_def/reviews` | 渠道复盘并登记领取（绑定已确认版本） |
+| GET | `/api/funnel_def/reviews` | 复盘记录（含领取版本与快照） |
+| GET | `/api/funnel_def/claims` | 批次内订单领取情况 |
+| POST | `/api/funnel_def/batches/{batch}/release` | 释放批次领取 |
+| GET | `/api/attribution_model/ledger/demo` | 载入 09:00 / 12:00 两笔订单演示数据 |
+
+前端在「归因分析」页提供逐笔贡献视图，在「漏斗分析」页提供渠道复盘与
+批次领取核对。
+
 ## 约定
 
 - 全部模块共享`frontend/src/views/WorkbenchView.vue|tsx`和一套资源路由。

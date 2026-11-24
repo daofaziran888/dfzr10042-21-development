@@ -90,6 +90,9 @@
       <span>共 {{ total }} 条{{ meta.name }}记录</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
+
+    <AttributionLedger v-if="meta.key === 'attribution_model'" />
+    <ChannelReview v-if="meta.key === 'funnel_def'" />
   </section>
 </template>
 
@@ -103,6 +106,8 @@ import {
   moduleMeta,
   runAction as applyAction,
 } from '@/api/backend-service'
+import AttributionLedger from '@/components/AttributionLedger.vue'
+import ChannelReview from '@/components/ChannelReview.vue'
 import type { EntryRow } from '@/data/types'
 
 const props = defineProps<{ moduleKey: string }>()

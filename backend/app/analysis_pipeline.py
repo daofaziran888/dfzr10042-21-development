@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.attribution import parse_timestamp
 from app.models import (
     ABExperiment,
     AggregationMethod,
@@ -322,15 +323,16 @@ def pipeline_attribution_to_funnel(
 ) -> dict[str, Any]:
     """归因分析到漏斗分析的完整管道。
 
-    1. 执行归因算法分配权重
-    2. 基于归因结果关联事件追踪
-    3. 构建漏斗分析
+    1. 逐笔订单执行归因，拿到订单粒度的贡献明细
+    2. 汇总出渠道权重，并把订单明细带进结果供渠道复盘使用
+    3. 基于归因结果关联事件追踪，构建漏斗分析
     """
     attribution_results = []
     funnel_results = []
 
     for model in models:
-        # 执行归因
+        # 执行归因（订单粒度）
+        contributions = model.attribute_orders(touchpoints, conversions)
         weights = model.attribute(touchpoints, conversions)
 
         # 构建基于归因事件的漏斗
@@ -358,12 +360,65 @@ def pipeline_attribution_to_funnel(
             "window_days": model.attribution_window_days,
             "channel_weights": weights,
             "total_weight": sum(weights.values()),
+            "conversion_count": len(contributions),
+            "contributions": contributions,
         })
 
     return {
         "pipeline": "attribution_model -> event_track -> funnel_def",
         "attributions": attribution_results,
         "funnels": funnel_results,
+    }
+
+
+# ============================================================
+# 流 5b: 已确认归因明细 -> 渠道复盘漏斗
+# ============================================================
+
+def pipeline_confirmed_attribution_to_channel_review(
+    version: dict[str, Any],
+    channel: str,
+    events: list[dict[str, Any]],
+    steps: list[str] | None = None,
+) -> dict[str, Any]:
+    """从一份已确认的逐笔归因明细出发，计算渠道复盘漏斗。
+
+    只取该渠道有正贡献的订单，用这些订单的归因窗口圈定复盘人群和事件
+    范围，再按步骤统计人数；结果里带上实际使用的归因版本与窗口。
+    """
+    from app.attribution import _compute_funnel_for
+
+    if version.get("status") not in ("confirmed", "superseded"):
+        raise ValueError("渠道复盘需要一份已确认的归因明细")
+
+    contributions = version.get("contributions", [])
+    selected = [
+        row for row in contributions
+        if float(row.get("channel_weights", {}).get(channel, 0.0)) > 0
+    ]
+    parsed_events = [
+        {**event, "_dt": parse_timestamp(event["timestamp"])}
+        for event in events
+        if event.get("timestamp")
+    ]
+    funnel = _compute_funnel_for(
+        selected, steps or ["访问", "加购", "下单", "支付"], parsed_events
+    )
+    return {
+        "pipeline": "attribution_model(confirmed) -> funnel_def(channel_review)",
+        "channel": channel,
+        "attribution_version": version.get("version_label"),
+        "window_minutes": version.get("window_minutes"),
+        "conversion_order_ids": [row["order_id"] for row in selected],
+        "population": {
+            "user_ids": sorted({row["user_id"] for row in selected}),
+            "user_count": len({row["user_id"] for row in selected}),
+        },
+        "conversion_event_range": funnel["event_range"],
+        "step_counts": funnel["step_counts"],
+        "cumulative_counts": funnel["cumulative_counts"],
+        "step_rates": funnel["step_rates"],
+        "total_conversion_rate": funnel["total_conversion_rate"],
     }
 
 
